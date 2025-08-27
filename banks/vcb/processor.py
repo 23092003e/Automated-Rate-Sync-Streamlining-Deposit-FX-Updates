@@ -156,22 +156,16 @@ class VCBProcessor(BaseBankProcessor):
             return pd.DataFrame(columns=out_cols)
         tail = root[1]
 
-        # Split Bid/Ask with optional colon (':' or '：' or none)
-        bid_m = re.search(r"(?i)\bBid\s*Price\b[:：]?", tail)
+        # VCB structure: Ask Price section has forward rates, Bid Price section has only spot rates
         ask_m = re.search(r"(?i)\bAsk\s*Price\b[:：]?", tail)
-
-        if not bid_m:
+        
+        if not ask_m:
             return pd.DataFrame(columns=out_cols)
 
-        if ask_m:
-            bid_text = tail[bid_m.end():ask_m.start()]
-            ask_text = tail[ask_m.end():]
-        else:
-            bid_text = tail[bid_m.end():]
-            ask_text = ""
-
+        # Only parse Ask section for forward rates
+        ask_text = tail[ask_m.end():]
+        
         rows = []
-        rows += self._parse_forward_side(bid_text, "Bid")
         rows += self._parse_forward_side(ask_text, "Ask")
 
         if not rows:
@@ -184,12 +178,13 @@ class VCBProcessor(BaseBankProcessor):
 
     def _parse_forward_side(self, text: str, side: str) -> list:
         """
-        Parse VCB forward side where only the first row has Spot.
-        We tokenize by lines and carry the last seen spot to subsequent rows.
+        Parse VCB forward side - handle missing spot in later terms
+        First term: Trading date, Value date, Spot rate, Term, Forward rate (5 lines)
+        Later terms: Trading date, Value date, Term, Forward rate (4 lines) - reuse last spot
         """
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-        # Find where data starts (first dd/mm/yyyy)
+        # Find where data starts (skip headers, look for first date)
         data_start = -1
         for i, line in enumerate(lines):
             if re.match(self.DATE_DMY, line):
@@ -203,68 +198,75 @@ class VCBProcessor(BaseBankProcessor):
         current_spot = None
         i = 0
 
+        # Pattern matching
+        spot_re = re.compile(r"\b\d{2}\.\d{3}\b")
+        term_re = re.compile(r"(\d+)\s*([DMWY])\s*\(\s*\)")
+
         while i < len(data_lines):
-            if not re.match(self.DATE_DMY, data_lines[i]):
+            # Need at least Trading date + Value date
+            if i + 1 >= len(data_lines):
+                break
+                
+            # Check if we have valid trading and value dates
+            if (not re.match(self.DATE_DMY, data_lines[i]) or 
+                not re.match(self.DATE_DMY, data_lines[i + 1])):
+                i += 1
+                continue
+                
+            trd_s = data_lines[i]
+            val_s = data_lines[i + 1]
+            
+            # Check if next line is spot rate or term
+            if i + 2 >= len(data_lines):
+                break
+                
+            next_line = data_lines[i + 2]
+            
+            if spot_re.match(next_line):
+                # This term has spot rate (first term usually)
+                if i + 4 >= len(data_lines):
+                    break
+                    
+                spot_s = data_lines[i + 2]
+                term_s = data_lines[i + 3] 
+                fwd_s = data_lines[i + 4]
+                current_spot = self._to_vcb_int(spot_s)
+                i += 5
+            elif term_re.match(next_line):
+                # This term has no spot rate (reuse last spot)
+                if i + 3 >= len(data_lines):
+                    break
+                    
+                term_s = data_lines[i + 2]
+                fwd_s = data_lines[i + 3]
+                i += 4
+            else:
                 i += 1
                 continue
 
-            # Need at least Value date and then [Spot?]/Term/Fwd
-            if i + 2 >= len(data_lines):
-                break
-
-            trd_s = data_lines[i]
-            val_s = data_lines[i + 1]
-
-            # Next token can be Spot (26.090) or Term ("1M ()")
-            next_tok = data_lines[i + 2]
-
-            # patterns
-            spot_re = re.compile(r"\b\d{2}\.\d{3}\b")
-            term_re = re.compile(r"(\d+)\s*([DMWY])\s*\(\s*\)")
-
-            if spot_re.match(next_tok):
-                # row has spot
-                current_spot = self._to_vcb_int(next_tok)
-                term_idx = i + 3
-                fwd_idx  = i + 4
-                next_i   = i + 5
-            else:
-                # missing spot -> reuse last
-                term_idx = i + 2
-                fwd_idx  = i + 3
-                next_i   = i + 4
-
-            # bounds
-            if fwd_idx >= len(data_lines):
-                break
-
-            term_s = data_lines[term_idx]
-            fwd_s  = data_lines[fwd_idx]
-
-            if not term_re.match(term_s):
-                i = next_i
+            # Validate term and forward rate
+            if not term_re.match(term_s) or not spot_re.match(fwd_s):
                 continue
+
+            # Parse values
+            trd = self._to_date(trd_s)
+            val = self._to_date(val_s)
+            fwd = self._to_vcb_int(fwd_s)
+            
             mterm = term_re.match(term_s)
             termnum = int(mterm.group(1))
             termunit = mterm.group(2).upper()
 
-            # forward must be 26.242 format
-            if not spot_re.match(fwd_s):
-                i = next_i
-                continue
-            fwd = self._to_vcb_int(fwd_s)
-
-            trd = self._to_date(trd_s)
-            val = self._to_date(val_s)
             if val < trd:
                 trd, val = val, trd
 
             term_days = self._days(trd, val)
             term_lookup = round(self._yearfrac_30360_us(trd, val) * 12)
 
-            # VCB thường không cung cấp Gap(%): ước tính non-annualized để bạn tham khảo
+            # Calculate gap percentage
             gap_pct = ((fwd - current_spot) / current_spot * 100) if current_spot else 0
             gap_pct = round(gap_pct, 2)
+            
             rows.append({
                 "Bid/Ask": side,
                 "Bank": self.bank_name,
@@ -272,15 +274,13 @@ class VCBProcessor(BaseBankProcessor):
                 "Trading date": trd,
                 "Value date": val,
                 "Spot Exchange rate": current_spot,
-                "Gap(%)": gap_pct,     # ví dụ 0.45 (không phải 0.0045)
+                "Gap(%)": gap_pct,
                 "Forward Exchange rate": fwd,
                 "Term (days)": term_days,
                 "% forward (cal)": None,
                 "Diff.": None,
                 "Term (lookup)": term_lookup
             })
-
-            i = next_i
 
         return rows
 

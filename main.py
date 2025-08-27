@@ -27,6 +27,13 @@ from banks.acb.processor import ACBProcessor
 from banks.vcb.processor import VCBProcessor
 from banks.bidv.processor import BIDVProcessor
 from banks.tcb.processor import TCBProcessor
+from banks.kbank.processor import KBankProcessor
+from banks.sc.processor import SCProcessor
+from banks.vib.processor import VIBProcessor
+from banks.vtb.processor import VTBProcessor
+from banks.woori.processor import WooriProcessor
+from banks.uob.processor import UOBProcessor
+from banks.uobv.processor import UOBVProcessor
 from output.merger import OutputMerger
 
 
@@ -43,10 +50,17 @@ class MultiBankProcessor:
             'VCB': VCBProcessor(),
             'BIDV': BIDVProcessor(),
             'TCB': TCBProcessor(),
+            'KBANK': KBankProcessor(),
+            'SC': SCProcessor(),
+            'VIB': VIBProcessor(),
+            'VTB': VTBProcessor(),
+            'WOORI': WooriProcessor(),
+            'UOB': UOBProcessor(),
+            'UOBV': UOBVProcessor(),
         }
         
-        # Banks that will use generic/fallback processing for now
-        self.pending_banks = ['KBANK', 'SC', 'UOB', 'UOBV', 'VIB', 'VTB', 'WOORI']
+        # All banks are now implemented
+        self.pending_banks = []
     
     def process_all_banks(self, msg_folder: str, output_file: str = "All_Banks_FX_Parsed.xlsx") -> None:
         """Process all bank MSG files and generate consolidated output"""
