@@ -1,9 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Read(C:\\Users\\ADMIN\\Desktop/**)",
+      "Read(C:\\Users\\ADMIN\\Desktop/**)",
+      "Read(C:\\Users\\ADMIN\\Downloads/**)"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "additionalDirectories": [
+      "C:\\c\\Users\\ADMIN"
+    ]
   }
 }
