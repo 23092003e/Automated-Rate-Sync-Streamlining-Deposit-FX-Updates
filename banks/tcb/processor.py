@@ -145,61 +145,117 @@ class TCBProcessor(BaseBankProcessor):
         return df
 
     def _parse_forward_side(self, text: str, side: str) -> List[Dict]:
-        """
-        Parse one side (Bid/Ask). Each match yields a row.
-        - Accept spot/fwd both '26,300' or '26300'
-        - Accept gap '1' or '1.20'
-        - Term captured but only used for consistency; Term(days) computed by Value-Trading
-        """
-        # \s+ matches newlines; labels tolerated
-        ROW_RE = re.compile(
-            rf"(?P<trd>{self.DATE_DMY})\s+"
-            rf"(?P<val>{self.DATE_DMY})\s+"
-            rf"(?P<spot>\d{{2}},?\d{{3}})\s+"
-            rf"(?P<termnum>\d+)\s*(?P<termunit>[DMWY])?\s*\(\s*\)\s+"
-            rf"(?P<gap>-?\d+(?:[.,]\d+)?)\s+"
-            rf"(?P<fwd>\d{{2}},?\d{{3}})",
-            flags=re.IGNORECASE
-        )
-
-        rows: List[Dict] = []
-        for m in ROW_RE.finditer(text):
-            trd_s = m.group("trd")
-            val_s = m.group("val")
-            spot_s = m.group("spot")
-            termnum = int(m.group("termnum"))
-            # ter mun it captured but not strictly needed
-            gap_s = m.group("gap").replace(",", ".")
-            fwd_s = m.group("fwd")
-
-            spot = self._to_int(spot_s)      # '26,300' -> 26300
-            fwd = self._to_int(fwd_s)        # '26,324' -> 26324
-            gap_pct = float(gap_s)           # '1.20' -> 1.20
-
-            trd = self._to_date(trd_s)       # date obj
+        """Parse TCB forward side - Handle missing spot rates like VCB"""
+        
+        # TCB structure: 
+        # Trading date (DD/MM/YYYY) -> Value date -> [Spot (only first row)] -> Term -> Gap% -> Forward rate
+        
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        
+        # Skip header lines
+        data_start = 0
+        for i, line in enumerate(lines):
+            if re.match(self.DATE_DMY, line):
+                data_start = i
+                break
+        
+        if data_start == 0:
+            return []
+        
+        data_lines = lines[data_start:]
+        rows = []
+        current_spot = None
+        i = 0
+        
+        while i < len(data_lines):
+            # Check if this looks like a trading date (DD/MM/YYYY)
+            if not re.match(self.DATE_DMY, data_lines[i]):
+                i += 1
+                continue
+                
+            # We need at least 5 more elements: Value date, [Spot], Term, Gap%, Forward
+            if i + 4 >= len(data_lines):
+                break
+                
+            trd_s = data_lines[i]
+            val_s = data_lines[i + 1]
+            
+            # Check if next element is a spot rate or a term
+            next_elem = data_lines[i + 2]
+            
+            if re.match(r'\d{2},\d{3}', next_elem):
+                # This row has spot rate
+                spot_s = next_elem
+                current_spot = self._to_int(spot_s)
+                term_idx = i + 3
+                gap_idx = i + 4
+                fwd_idx = i + 5
+                next_i = i + 6
+            else:
+                # This row doesn't have spot rate, use previous spot
+                term_idx = i + 2
+                gap_idx = i + 3
+                fwd_idx = i + 4
+                next_i = i + 5
+            
+            # Check bounds
+            if fwd_idx >= len(data_lines):
+                break
+                
+            term_s = data_lines[term_idx]
+            gap_s = data_lines[gap_idx]
+            fwd_s = data_lines[fwd_idx]
+            
+            # Extract term number and unit (TCB uses parentheses like ACB)
+            term_match = re.match(r'(\d+)\s*([DMWY])\s*\(\s*\)', term_s)
+            if not term_match:
+                i = next_i
+                continue
+                
+            termnum = int(term_match.group(1))
+            termunit = term_match.group(2).upper()
+            
+            # Validate gap format
+            if not re.match(r'\d+\.\d+', gap_s):
+                i = next_i
+                continue
+                
+            gap_pct = float(gap_s)
+            
+            # Validate forward rate format
+            if not re.match(r'\d{2},\d{3}', fwd_s):
+                i = next_i
+                continue
+                
+            fwd = self._to_int(fwd_s)
+            
+            trd = self._to_date(trd_s)
             val = self._to_date(val_s)
-
-            # Ensure non-negative days
+            
+            # Ensure correct order
             if val < trd:
                 trd, val = val, trd
-
+            
             term_days = self._days(trd, val)
             term_lookup = round(self._yearfrac_30360_us(trd, val) * 12)
-
+            
             rows.append({
                 "Bid/Ask": side,
                 "Bank": self.bank_name,
-                "Quoting date": trd,     # keep as date (Excel YEARFRAC ok)
+                "Quoting date": trd,
                 "Trading date": trd,
                 "Value date": val,
-                "Spot Exchange rate": spot,
-                "Gap(%)": gap_pct,       # keep 1.20 (not 0.012)
+                "Spot Exchange rate": current_spot,
+                "Gap(%)": gap_pct,
                 "Forward Exchange rate": fwd,
                 "Term (days)": term_days,
-                "% forward (cal)": None, # to be filled by Excel formula
-                "Diff.": None,           # to be filled by Excel formula
+                "% forward (cal)": None,  # Excel formula
+                "Diff.": None,  # Excel formula
                 "Term (lookup)": term_lookup
             })
+            
+            i = next_i
+        
         return rows
 
     # -------------------------------
@@ -210,6 +266,7 @@ class TCBProcessor(BaseBankProcessor):
         qd = self._first_date(email_text) or ""
         return pd.DataFrame([{
             "No.": 1,
+            "Bank": self.bank_name,
             "Quoting date": qd,
             "Central Bank Rate": None
         }], columns=out_cols)

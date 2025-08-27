@@ -159,6 +159,7 @@ class ACBProcessor(BaseBankProcessor):
         qd = self._first_date(email_text) or ""
         return pd.DataFrame([{
             "No.": 1,
+            "Bank": self.bank_name,
             "Quoting date": qd,
             "Central Bank Rate": None
         }], columns=out_cols)

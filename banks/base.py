@@ -66,7 +66,7 @@ class BaseBankProcessor(ABC):
                 "Closing rate of Friday (last week)"
             ],
             'central': [
-                "No.", "Quoting date", "Central Bank Rate"
+                "No.", "Bank", "Quoting date", "Central Bank Rate"
             ]
         }
     

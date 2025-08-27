@@ -32,6 +32,16 @@ class BIDVProcessor(BaseBankProcessor):
         # BIDV uses format like 26,284.00 -> 26284
         return int(float(str(s).replace(',', '')))
     
+    def _first_bidv_date(self, text: str) -> str:
+        """Extract first date from BIDV email (MM/DD/YYYY format)"""
+        dates = re.findall(r'\d{1,2}/\d{1,2}/\d{4}', text)
+        if dates:
+            # Convert MM/DD/YYYY to DD/MM/YYYY
+            mdy = dates[0]
+            parts = mdy.split('/')
+            return f"{parts[1]}/{parts[0]}/{parts[2]}"
+        return ""
+    
     def _parse_spot(self, email_text: str) -> pd.DataFrame:
         """Parse BIDV Spot Exchange Rates"""
         out_cols = self.get_standard_columns()['spot']
@@ -61,7 +71,7 @@ class BIDVProcessor(BaseBankProcessor):
             bid_close = self._to_bidv_int(all_rates[4]) # 26,428.00
             ask_close = self._to_bidv_int(all_rates[5]) # 26,429.00
         
-        quoting_date = self._first_date(email_text) or ""
+        quoting_date = self._first_bidv_date(email_text) or ""
         
         rows = []
         for i, (side, closing, low, high) in enumerate([
@@ -112,38 +122,91 @@ class BIDVProcessor(BaseBankProcessor):
         return df
     
     def _parse_forward_side(self, text: str, side: str) -> list:
-        """Parse BIDV forward side - Fixed to handle multiline format"""
-        # BIDV uses MM/DD/YYYY date format instead of DD/MM/YYYY
+        """Parse BIDV forward side - Handle missing spot rates like VCB"""
+        # BIDV uses MM/DD/YYYY date format
         DATE_MDY = r"(?:0[1-9]|1[0-2])/(?:0[1-9]|[12]\d|3[01])/(?:19|20)\d\d"
         
-        # Normalize text - replace multiple whitespaces/newlines with single space
-        normalized_text = re.sub(r'\s+', ' ', text.strip())
+        # BIDV structure: 
+        # Trading date (MM/DD/YYYY) -> Value date -> [Spot (only first row)] -> Term -> Gap% -> Forward rate
         
-        # Pattern for BIDV forward rows (flexible for multiline):
-        # 08/25/2025   09/24/2025   26,307.00   1M   1.60   26,342
-        ROW_RE = re.compile(
-            rf"(?P<trd>{DATE_MDY})\s+"
-            rf"(?P<val>{DATE_MDY})\s+"
-            rf"(?P<spot>\d{{2}},\d{{3}}\.\d{{2}})\s+"  # BIDV spot: 26,307.00
-            rf"(?P<termnum>\d+)\s*(?P<termunit>[DMWY])\s+"
-            rf"(?P<gap>\d+\.\d+)\s+"  # Gap like 1.60
-            rf"(?P<fwd>\d{{2}},\d{{3}})",  # BIDV forward: 26,342 (no decimal)
-            flags=re.IGNORECASE
-        )
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
         
+        # Skip header lines
+        data_start = 0
+        for i, line in enumerate(lines):
+            if re.match(DATE_MDY, line):
+                data_start = i
+                break
+        
+        if data_start == 0:
+            return []
+        
+        data_lines = lines[data_start:]
         rows = []
+        current_spot = None
+        i = 0
         
-        for m in ROW_RE.finditer(normalized_text):
-            trd_s = m.group("trd")
-            val_s = m.group("val")
-            spot_s = m.group("spot")
-            termnum = int(m.group("termnum"))
-            termunit = (m.group("termunit") or "M").upper()
-            gap_pct = float(m.group("gap"))
-            fwd_s = m.group("fwd")
+        while i < len(data_lines):
+            # Check if this looks like a trading date (MM/DD/YYYY)
+            if not re.match(DATE_MDY, data_lines[i]):
+                i += 1
+                continue
+                
+            # We need at least 5 more elements: Value date, [Spot], Term, Gap%, Forward
+            if i + 4 >= len(data_lines):
+                break
+                
+            trd_s = data_lines[i]
+            val_s = data_lines[i + 1]
             
-            spot = self._to_bidv_int(spot_s)
-            fwd = self._to_int(fwd_s)  # Use standard _to_int for comma removal
+            # Check if next element is a spot rate or a term
+            next_elem = data_lines[i + 2]
+            
+            if re.match(r'\d{2},\d{3}\.\d{2}', next_elem):
+                # This row has spot rate
+                spot_s = next_elem
+                current_spot = self._to_bidv_int(spot_s)
+                term_idx = i + 3
+                gap_idx = i + 4
+                fwd_idx = i + 5
+                next_i = i + 6
+            else:
+                # This row doesn't have spot rate, use previous spot
+                term_idx = i + 2
+                gap_idx = i + 3
+                fwd_idx = i + 4
+                next_i = i + 5
+            
+            # Check bounds
+            if fwd_idx >= len(data_lines):
+                break
+                
+            term_s = data_lines[term_idx]
+            gap_s = data_lines[gap_idx]
+            fwd_s = data_lines[fwd_idx]
+            
+            # Extract term number and unit (BIDV doesn't use parentheses)
+            term_match = re.match(r'(\d+)\s*([DMWY])', term_s)
+            if not term_match:
+                i = next_i
+                continue
+                
+            termnum = int(term_match.group(1))
+            termunit = term_match.group(2).upper()
+            
+            # Validate gap format
+            if not re.match(r'\d+\.\d+', gap_s):
+                i = next_i
+                continue
+                
+            gap_pct = float(gap_s)
+            
+            # Validate forward rate format
+            if not re.match(r'\d{2},\d{3}', fwd_s):
+                i = next_i
+                continue
+                
+            fwd = self._to_int(fwd_s)
             
             # Convert MM/DD/YYYY to DD/MM/YYYY for parsing
             trd_parts = trd_s.split('/')
@@ -167,7 +230,7 @@ class BIDVProcessor(BaseBankProcessor):
                 "Quoting date": trd,
                 "Trading date": trd,
                 "Value date": val,
-                "Spot Exchange rate": spot,
+                "Spot Exchange rate": current_spot,
                 "Gap(%)": gap_pct,
                 "Forward Exchange rate": fwd,
                 "Term (days)": term_days,
@@ -175,14 +238,18 @@ class BIDVProcessor(BaseBankProcessor):
                 "Diff.": None,  # Excel formula
                 "Term (lookup)": term_lookup
             })
+            
+            i = next_i
+        
         return rows
     
     def _build_central_bank(self, email_text: str) -> pd.DataFrame:
         """Build Central Bank rate stub for BIDV"""
         out_cols = self.get_standard_columns()['central']
-        qd = self._first_date(email_text) or ""
+        qd = self._first_bidv_date(email_text) or ""
         return pd.DataFrame([{
             "No.": 1,
+            "Bank": self.bank_name,
             "Quoting date": qd,
             "Central Bank Rate": None
         }], columns=out_cols)

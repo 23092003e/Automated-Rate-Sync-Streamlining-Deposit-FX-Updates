@@ -112,8 +112,14 @@ class VCBProcessor(BaseBankProcessor):
         high_bid,  high_ask  = extract_pair(idx_high,  end_high)
         close_bid, close_ask = extract_pair(idx_close, -1)
 
-        # 6) Quoting date đồng bộ (ưu tiên từ Forward)
-        quoting_date = quoting_date_override or (self._first_date(email_text) or "")
+        # 6) Quoting date đồng bộ (ưu tiên từ Forward) - convert to string format
+        if quoting_date_override:
+            if hasattr(quoting_date_override, 'strftime'):
+                quoting_date = quoting_date_override.strftime('%d/%m/%Y')
+            else:
+                quoting_date = str(quoting_date_override)
+        else:
+            quoting_date = self._first_date(email_text) or ""
 
         rows = [
             {
@@ -283,9 +289,16 @@ class VCBProcessor(BaseBankProcessor):
     # -------------------------------
     def _build_central_bank(self, email_text: str = "", quoting_date_override=None) -> pd.DataFrame:
         out_cols = self.get_standard_columns()['central']
-        qd = quoting_date_override or (self._first_date(email_text) or "")
+        if quoting_date_override:
+            if hasattr(quoting_date_override, 'strftime'):
+                qd = quoting_date_override.strftime('%d/%m/%Y')
+            else:
+                qd = str(quoting_date_override)
+        else:
+            qd = self._first_date(email_text) or ""
         return pd.DataFrame([{
             "No.": 1,
+            "Bank": self.bank_name,
             "Quoting date": qd,
             "Central Bank Rate": None
         }], columns=out_cols)
