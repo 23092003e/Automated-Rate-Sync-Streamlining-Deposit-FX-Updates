@@ -24,6 +24,9 @@ sys.path.append(str(Path(__file__).parent))
 
 from utils.email_extractor import EmailExtractor
 from banks.acb.processor import ACBProcessor
+from banks.vcb.processor import VCBProcessor
+from banks.bidv.processor import BIDVProcessor
+from banks.tcb.processor import TCBProcessor
 from output.merger import OutputMerger
 
 
@@ -37,10 +40,13 @@ class MultiBankProcessor:
         # Initialize bank processors
         self.processors = {
             'ACB': ACBProcessor(),
+            'VCB': VCBProcessor(),
+            'BIDV': BIDVProcessor(),
+            'TCB': TCBProcessor(),
         }
         
         # Banks that will use generic/fallback processing for now
-        self.pending_banks = ['BIDV', 'KBANK', 'SC', 'TCB', 'UOB', 'UOBV', 'VCB', 'VIB', 'VTB', 'WOORI']
+        self.pending_banks = ['KBANK', 'SC', 'UOB', 'UOBV', 'VIB', 'VTB', 'WOORI']
     
     def process_all_banks(self, msg_folder: str, output_file: str = "All_Banks_FX_Parsed.xlsx") -> None:
         """Process all bank MSG files and generate consolidated output"""
@@ -79,8 +85,7 @@ class MultiBankProcessor:
                     processed_count += 1
                     
                 else:
-                    # Bank not yet implemented
-                    print(f"  PENDING {bank_name}: Parser not yet implemented (will be added in future)")
+                    print(f"  PENDING {bank_name}: No specific processor implemented yet.")
                     
             except Exception as e:
                 print(f"  ERROR {bank_name}: Error processing - {str(e)}")
