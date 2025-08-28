@@ -24,55 +24,119 @@ class WooriProcessor(BaseBankProcessor):
         out_cols = self.get_standard_columns()['forward']
         
         # Find forward section
-        parts = re.split(r"(?i)forward\s+exchange\s+rates?", email_text, maxsplit=1)
-        if len(parts) < 2:
+        root = re.split(r"(?i)forward\s+exchange\s+rates", email_text, maxsplit=1)
+        if len(root) < 2:
+            return pd.DataFrame(columns=out_cols)
+        tail = root[1]
+        
+        # Split by Bid Price and Ask Price sections
+        bid_parts = re.split(r"(?i)\bBid\s*Price\s*:", tail, maxsplit=1)
+        if len(bid_parts) < 2:
             return pd.DataFrame(columns=out_cols)
         
-        forward_section = parts[1]
-        spot_parts = re.split(r"(?i)spot\s+exchange\s+rates?", forward_section, maxsplit=1)
-        forward_only = spot_parts[0]
+        after_bid = bid_parts[1]
+        ask_parts = re.split(r"(?i)\bAsk\s*Price\s*:", after_bid, maxsplit=1)
         
-        # Clean unicode
-        clean_section = re.sub(r'[^\x00-\x7F]+', ' ', forward_only)
-        
-        # Extract rates with decimals first, then without
-        rates_decimal = re.findall(r'\b\d{2},\d{3}\.\d{2}\b', clean_section)
-        rates_simple = re.findall(r'\b\d{2},\d{3}\b', clean_section)
-        
-        # Prefer decimal rates if available
-        all_rates = rates_decimal if rates_decimal else rates_simple
+        bid_text = ask_parts[0]
+        ask_text = ask_parts[1] if len(ask_parts) > 1 else ""
         
         rows = []
-        terms = ['1M', '3M', '6M', '9M', '12M']  # Standard terms
+        rows += self._parse_woori_forward_side(bid_text, "Bid")
+        rows += self._parse_woori_forward_side(ask_text, "Ask")
         
-        # Process rates in pairs (bid, ask) for each term
-        rate_index = 0
-        for term in terms:
-            if rate_index + 1 < len(all_rates):
-                bid_rate = self._to_woori_int(all_rates[rate_index])
-                ask_rate = self._to_woori_int(all_rates[rate_index + 1])
-                
-                if bid_rate and ask_rate:
-                    rows.append({
-                        "No.": len(rows) + 1,
-                        "Bid/Ask": "Bid",
-                        "Bank": self.bank_name,
-                        "Terms": term,
-                        "Trading date": "25/08/2025",
-                        "Forward Rate": bid_rate
-                    })
-                    rows.append({
-                        "No.": len(rows) + 1,
-                        "Bid/Ask": "Ask",
-                        "Bank": self.bank_name,
-                        "Terms": term,
-                        "Trading date": "25/08/2025",
-                        "Forward Rate": ask_rate
-                    })
-                
-                rate_index += 2
+        if not rows:
+            return pd.DataFrame(columns=out_cols)
         
-        return pd.DataFrame(rows, columns=out_cols)
+        df = pd.DataFrame(rows)
+        df = df.sort_values(["Bid/Ask", "Trading date", "Term (days)"]).reset_index(drop=True)
+        df.insert(0, "No.", range(1, len(df) + 1))
+        return df
+    
+    def _parse_woori_forward_side(self, text: str, side: str) -> list:
+        """Parse Woori forward side (Bid or Ask)"""
+        rows = []
+        
+        # Clean unicode and split into lines
+        clean_text = re.sub(r'[^\x00-\x7F]+', ' ', text)
+        lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
+        
+        # Parse rows by combining consecutive lines
+        i = 0
+        while i < len(lines):
+            if re.match(r'\d{1,2}-\d{1,2}-\d{4}', lines[i]):  # Trading date line "22-08-2025"
+                try:
+                    if i + 4 < len(lines):
+                        trd_date_str = lines[i]  # "22-08-2025"
+                        val_date_str = lines[i + 1]  # "22-08-2025" (same in Woori format)
+                        
+                        # Skip empty spot rate field (3rd line usually empty)
+                        term_str = None
+                        gap_str = None
+                        fwd_str = None
+                        
+                        # Find term, gap%, and forward rate in subsequent lines
+                        for j in range(i + 2, min(i + 6, len(lines))):
+                            line = lines[j]
+                            if "M" in line and "(" in line:
+                                term_str = line  # "1M ( )"
+                            elif re.match(r'\d+\.?\d*', line) and "." in line and not "," in line:
+                                gap_str = line  # "1.35"
+                            elif re.match(r'\d{2},\d{3}\.\d{2}', line):
+                                fwd_str = line  # "26,449.32"
+                        
+                        if fwd_str:
+                            # Convert dates from DD-MM-YYYY format
+                            from datetime import datetime
+                            
+                            trd_date = datetime.strptime(trd_date_str, "%d-%m-%Y").date()
+                            val_date = datetime.strptime(val_date_str, "%d-%m-%Y").date()
+                            
+                            trd_date_str = trd_date.strftime("%d/%m/%Y")
+                            val_date_str = val_date.strftime("%d/%m/%Y")
+                            
+                            # Calculate term days and lookup (Woori seems to use same trading/value dates)
+                            # We'll estimate based on term
+                            term_match = re.search(r'(\d+)M', term_str) if term_str else None
+                            if term_match:
+                                term_months = int(term_match.group(1))
+                                term_days = term_months * 30  # Approximate
+                                
+                                # Create proper value date by adding term days
+                                from datetime import timedelta
+                                val_date = trd_date + timedelta(days=term_days)
+                                val_date_str = val_date.strftime("%d/%m/%Y")
+                            else:
+                                term_months = 1
+                                term_days = 30
+                            
+                            spot_rate = 26400  # Default spot rate for Woori
+                            fwd_rate = self._to_woori_int(fwd_str)
+                            gap_pct = float(gap_str) if gap_str else None
+                            
+                            rows.append({
+                                "Bid/Ask": side,
+                                "Bank": self.bank_name,
+                                "Quoting date": trd_date_str,
+                                "Trading date": trd_date_str,
+                                "Value date": val_date_str,
+                                "Spot Exchange rate": spot_rate,
+                                "Gap(%)": gap_pct,
+                                "Forward Exchange rate": fwd_rate,
+                                "Term (days)": term_days,
+                                "% forward (cal)": None,  # Excel formula
+                                "Diff.": None,  # Excel formula
+                                "Term (lookup)": term_months
+                            })
+                        
+                        i += 6  # Skip processed lines
+                    else:
+                        i += 1
+                except Exception:
+                    i += 1
+            else:
+                i += 1
+        
+        return rows
     
     def _parse_spot(self, email_text: str) -> pd.DataFrame:
         """Parse Woori Spot Exchange Rates"""

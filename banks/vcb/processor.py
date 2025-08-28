@@ -156,17 +156,23 @@ class VCBProcessor(BaseBankProcessor):
             return pd.DataFrame(columns=out_cols)
         tail = root[1]
 
-        # VCB structure: Ask Price section has forward rates, Bid Price section has only spot rates
+        # VCB structure: Both Ask and Bid sections have forward rates
         ask_m = re.search(r"(?i)\bAsk\s*Price\b[:：]?", tail)
-        
-        if not ask_m:
-            return pd.DataFrame(columns=out_cols)
-
-        # Only parse Ask section for forward rates
-        ask_text = tail[ask_m.end():]
+        bid_m = re.search(r"(?i)\bBid\s*Price\b[:：]?", tail)
         
         rows = []
-        rows += self._parse_forward_side(ask_text, "Ask")
+        
+        # Parse Ask section
+        if ask_m:
+            ask_start = ask_m.end()
+            ask_end = bid_m.start() if bid_m and bid_m.start() > ask_start else len(tail)
+            ask_text = tail[ask_start:ask_end]
+            rows += self._parse_forward_side(ask_text, "Ask")
+        
+        # Parse Bid section
+        if bid_m:
+            bid_text = tail[bid_m.end():]
+            rows += self._parse_forward_side(bid_text, "Bid")
 
         if not rows:
             return pd.DataFrame(columns=out_cols)
@@ -197,12 +203,13 @@ class VCBProcessor(BaseBankProcessor):
         rows = []
         current_spot = None
         i = 0
+        terms_processed = 0  # Limit to 5 terms per side
 
         # Pattern matching
         spot_re = re.compile(r"\b\d{2}\.\d{3}\b")
         term_re = re.compile(r"(\d+)\s*([DMWY])\s*\(\s*\)")
 
-        while i < len(data_lines):
+        while i < len(data_lines) and terms_processed < 5:
             # Need at least Trading date + Value date
             if i + 1 >= len(data_lines):
                 break
@@ -281,6 +288,7 @@ class VCBProcessor(BaseBankProcessor):
                 "Diff.": None,
                 "Term (lookup)": term_lookup
             })
+            terms_processed += 1
 
         return rows
 

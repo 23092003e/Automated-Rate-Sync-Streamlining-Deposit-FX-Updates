@@ -5,7 +5,10 @@
       "Read(C:\\Users\\ADMIN\\Desktop/**)",
       "Read(C:\\Users\\ADMIN\\Desktop/**)",
       "Read(C:\\Users\\ADMIN\\Downloads/**)",
-      "Bash(del \"All_Banks_FX_Parsed.xlsx\")"
+      "Bash(del \"All_Banks_FX_Parsed.xlsx\")",
+      "Read(C:\\Users\\ADMIN\\Downloads\\W4_Aug_25/**)",
+      "Read(C:\\Users\\ADMIN\\Downloads\\W4_Aug_25/**)",
+      "Read(C:\\Users\\ADMIN\\Downloads\\W4_Aug_25/**)"
     ],
     "deny": [],
     "ask": [],
